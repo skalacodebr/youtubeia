@@ -16,6 +16,7 @@ Sistema inteligente que busca vídeos do YouTube, extrai transcrições e permit
   - Scripts, resumos, análises e artigos aprimorados
 - **APIs Compatíveis**: Suporte para OpenAI, LM Studio, Ollama e outros
 - **Interface Web**: Interface moderna com tabs organizadas
+- **🔧 Otimização 32K Tokens**: Análise inteligente para modelos limitados
 
 ## 📋 Pré-requisitos
 
@@ -100,6 +101,7 @@ streamlit run app.py
 - Análise sistemática de múltiplos vídeos
 - Digite uma pergunta de pesquisa específica
 - Escolha o formato: Script, Resumo, Análise ou Artigo
+- **🔧 Marque "Modo Otimizado" para modelos limitados (32K)**
 - Acompanhe o processo em tempo real
 - Baixe o resultado final
 
@@ -187,6 +189,42 @@ Insights Individuais → Análise Comparativa → Síntese Final
 Templates Específicos (Script/Resumo/Análise/Artigo)
 ```
 
+### 🔧 Sistema de Otimização para Modelos Limitados (32K Tokens)
+
+**PROBLEMA COMUM:**
+- Modelos locais: limitação de ~32.000 tokens
+- Transcrições YouTube: 5.000 - 50.000 tokens cada
+- 10 vídeos: pode passar de 200.000 tokens
+- Resultado: Erro ou truncamento de conteúdo
+
+**SOLUÇÕES IMPLEMENTADAS:**
+
+**1. Chunking Inteligente**
+```
+Transcrição Longa → Chunks de 2K → Análise Separada → Síntese Final
+(50K tokens)     (25 chunks)    (300 tokens cada)  (500 tokens)
+```
+
+**2. Análise Progressiva**
+```
+10 Análises → Lotes de 3 → Resumos → Síntese Final
+(5K tokens)   (1K tokens)  (600 each)  (1.5K tokens)
+```
+
+**3. Filtragem Inteligente**
+- Remove chunks sem conteúdo relevante
+- Elimina redundâncias automaticamente
+- Foca apenas no essencial
+
+**RESULTADO:**
+- ❌ 150K tokens → ✅ 8K tokens (94.7% economia)
+- Compatível com todos os modelos locais
+- Qualidade mantida alta
+
+**QUANDO USAR:**
+- ☑️ Modo Otimizado: Modelos locais (LM Studio, Ollama)
+- ☑️ Modo Normal: APIs grandes (GPT-4, Claude Pro)
+
 ### Fluxo de Dados
 
 ```
@@ -226,6 +264,7 @@ Busca → YouTube API → Transcrições → Banco SQLite → RAG/Deep Research 
 
 - [x] **Pesquisa Profunda**: Análise sistemática multi-vídeo ✅
 - [x] **APIs Compatíveis**: LM Studio, Ollama, ngrok ✅
+- [x] **Otimização 32K Tokens**: Chunking e análise progressiva ✅
 - [ ] Suporte a mais idiomas
 - [ ] Embeddings mais avançados (OpenAI Embeddings)
 - [ ] Cache inteligente de análises

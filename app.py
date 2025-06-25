@@ -682,6 +682,327 @@ class DeepResearchSystem:
             "research_gaps": research_gaps if research_gaps else []
         }
 
+class TokenOptimizedResearch:
+    def __init__(self, rag_system):
+        self.rag_system = rag_system
+        self.max_tokens = 28000  # Margem de segurança para 32K
+        self.chunk_size = 2000   # Tamanho de cada chunk de transcrição
+        
+    def estimate_tokens(self, text: str) -> int:
+        """Estima número de tokens (aproximadamente 4 chars = 1 token)"""
+        return len(text) // 4
+    
+    def chunk_transcript(self, transcript: str, chunk_size: Optional[int] = None) -> List[str]:
+        """Divide transcrição em chunks menores"""
+        if chunk_size is None:
+            chunk_size = self.chunk_size
+            
+        # Divide por sentenças para manter contexto
+        sentences = transcript.split('. ')
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            # Se adicionar esta sentença não ultrapassar o limite
+            if len(current_chunk + sentence) < chunk_size:
+                current_chunk += sentence + ". "
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + ". "
+        
+        # Adiciona o último chunk
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+            
+        return chunks
+    
+    def analyze_video_chunk(self, chunk: str, video_title: str, research_query: str, chunk_index: int) -> str:
+        """Analisa um chunk específico de um vídeo"""
+        client = getattr(st.session_state, 'openai_client', None) or openai_client
+        model = getattr(st.session_state, 'current_model', None) or OPENAI_MODEL
+        
+        if not client:
+            return "Erro: Cliente não configurado"
+        
+        analysis_prompt = f"""
+        Analise este FRAGMENTO do vídeo "{video_title}" (parte {chunk_index + 1}):
+        
+        FRAGMENTO:
+        {chunk}
+        
+        PERGUNTA: {research_query}
+        
+        Extraia APENAS deste fragmento:
+        1. **INSIGHTS RELEVANTES** (2-3 pontos máximo)
+        2. **DADOS/NÚMEROS** (se houver)
+        3. **EXEMPLOS PRÁTICOS** (se houver)
+        
+        Seja CONCISO. Foque apenas no que é diretamente relevante à pergunta.
+        Se este fragmento não contém informações relevantes, responda apenas "FRAGMENTO SEM CONTEÚDO RELEVANTE".
+        """
+        
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Você é um analista especializado em extrair insights relevantes de fragmentos de texto."},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                max_tokens=300,  # Análise concisa
+                temperature=0.2
+            )
+            
+            return response.choices[0].message.content or "Erro na análise"
+            
+        except Exception as e:
+            return f"Erro: {str(e)}"
+    
+    def synthesize_video_analysis(self, chunk_analyses: List[str], video_title: str, research_query: str) -> str:
+        """Sintetiza análises de chunks em uma análise consolidada do vídeo"""
+        client = getattr(st.session_state, 'openai_client', None) or openai_client
+        model = getattr(st.session_state, 'current_model', None) or OPENAI_MODEL
+        
+        if not client:
+            return "Erro: Cliente não configurado"
+        
+        # Remove fragmentos irrelevantes
+        relevant_analyses = [analysis for analysis in chunk_analyses 
+                           if "FRAGMENTO SEM CONTEÚDO RELEVANTE" not in analysis]
+        
+        if not relevant_analyses:
+            return f"VÍDEO: {video_title}\nNENHUM CONTEÚDO RELEVANTE ENCONTRADO"
+        
+        combined_analysis = "\n\n".join(relevant_analyses)
+        
+        synthesis_prompt = f"""
+        Consolide estas análises de fragmentos do vídeo "{video_title}":
+        
+        ANÁLISES DOS FRAGMENTOS:
+        {combined_analysis}
+        
+        PERGUNTA: {research_query}
+        
+        Crie uma SÍNTESE CONSOLIDADA que contenha:
+        1. **INSIGHTS PRINCIPAIS** (3-5 pontos)
+        2. **DADOS/ESTATÍSTICAS** (consolidados)
+        3. **EXEMPLOS/CASOS** (únicos)
+        4. **RELEVÂNCIA** (1-10)
+        
+        Elimine redundâncias e mantenha apenas o essencial.
+        """
+        
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Você é um especialista em consolidar análises fragmentadas."},
+                    {"role": "user", "content": synthesis_prompt}
+                ],
+                max_tokens=500,
+                temperature=0.3
+            )
+            
+            return response.choices[0].message.content or "Erro na síntese"
+            
+        except Exception as e:
+            return f"Erro: {str(e)}"
+    
+    def analyze_video_optimized(self, video_data: Dict, research_query: str) -> Dict:
+        """Analisa um vídeo de forma otimizada para tokens limitados"""
+        
+        # Se a transcrição é pequena, analisa diretamente
+        if self.estimate_tokens(video_data["transcript"]) < 2000:
+            # Usa análise normal para vídeos pequenos
+            deep_research = DeepResearchSystem(self.rag_system)
+            return deep_research.analyze_individual_video(video_data, research_query)
+        
+        # Para vídeos grandes, usa chunking
+        st.write(f"   📄 Vídeo longo detectado: {video_data['title'][:50]}...")
+        st.write(f"   🔀 Dividindo em chunks para análise otimizada...")
+        
+        chunks = self.chunk_transcript(video_data["transcript"])
+        chunk_analyses = []
+        
+        # Analisa cada chunk
+        for i, chunk in enumerate(chunks):
+            analysis = self.analyze_video_chunk(chunk, video_data["title"], research_query, i)
+            chunk_analyses.append(analysis)
+        
+        # Sintetiza análises dos chunks
+        consolidated_analysis = self.synthesize_video_analysis(chunk_analyses, video_data["title"], research_query)
+        
+        return {
+            "video_id": video_data["video_id"],
+            "title": video_data["title"],
+            "analysis": consolidated_analysis,
+            "status": "success",
+            "chunks_processed": len(chunks)
+        }
+    
+    def progressive_synthesis(self, analyses: List[str], research_query: str, output_type: str) -> str:
+        """Síntese progressiva em múltiplas etapas para economizar tokens"""
+        client = getattr(st.session_state, 'openai_client', None) or openai_client
+        model = getattr(st.session_state, 'current_model', None) or OPENAI_MODEL
+        
+        if not client:
+            return "Erro: Cliente não configurado"
+        
+        # Passo 1: Agrupa análises em lotes pequenos
+        batch_size = 3  # 3 análises por vez
+        batches = [analyses[i:i + batch_size] for i in range(0, len(analyses), batch_size)]
+        
+        batch_summaries = []
+        
+        st.write(f"   🔄 Processando {len(batches)} lotes de análises...")
+        
+        # Passo 2: Sumariza cada lote
+        for i, batch in enumerate(batches):
+            st.write(f"   📊 Processando lote {i + 1}/{len(batches)}...")
+            
+            batch_content = "\n\n".join(batch)
+            
+            batch_prompt = f"""
+            Sumarize estas análises de vídeos relacionadas à pergunta: "{research_query}"
+            
+            ANÁLISES:
+            {batch_content}
+            
+            Crie um RESUMO CONSOLIDADO que contenha:
+            1. **INSIGHTS PRINCIPAIS** (máximo 5)
+            2. **DADOS IMPORTANTES** (números, estatísticas)
+            3. **EXEMPLOS RELEVANTES** (casos práticos)
+            4. **PADRÕES IDENTIFICADOS** (tendências)
+            
+            Seja conciso mas completo. Elimine redundâncias.
+            """
+            
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "Você é um especialista em consolidar múltiplas análises."},
+                        {"role": "user", "content": batch_prompt}
+                    ],
+                    max_tokens=600,
+                    temperature=0.3
+                )
+                
+                batch_summary = response.choices[0].message.content or f"Erro no lote {i + 1}"
+                batch_summaries.append(batch_summary)
+                
+            except Exception as e:
+                batch_summaries.append(f"Erro no lote {i + 1}: {str(e)}")
+        
+        # Passo 3: Síntese final dos resumos dos lotes
+        st.write("   🎯 Criando síntese final...")
+        
+        final_content = "\n\n".join(batch_summaries)
+        
+        # Templates otimizados para tokens limitados
+        templates = {
+            "script": "Crie um SCRIPT DE VÍDEO (5-7 min) com [INTRO][DESENVOLVIMENTO][CONCLUSÃO]. Use dados e exemplos dos resumos.",
+            "resumo": "Crie um RESUMO EXECUTIVO estruturado com insights principais, dados e recomendações.",
+            "analise": "Faça uma ANÁLISE COMPARATIVA identificando padrões, tendências e conclusões.",
+            "artigo": "Escreva um ARTIGO com título, introdução, desenvolvimento por tópicos e conclusão."
+        }
+        
+        final_prompt = f"""
+        PERGUNTA DE PESQUISA: {research_query}
+        
+        RESUMOS CONSOLIDADOS DOS VÍDEOS:
+        {final_content}
+        
+        TAREFA: {templates.get(output_type, templates["resumo"])}
+        
+        Use todos os insights, dados e exemplos dos resumos para criar um {output_type} profissional e completo.
+        Mantenha estrutura clara e linguagem envolvente.
+        """
+        
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": f"Você é um especialista em criar {output_type}s profissionais baseados em pesquisa."},
+                    {"role": "user", "content": final_prompt}
+                ],
+                max_tokens=1500,
+                temperature=0.4
+            )
+            
+            return response.choices[0].message.content or f"Erro ao gerar {output_type}"
+            
+        except Exception as e:
+            return f"Erro na síntese final: {str(e)}"
+    
+    def conduct_optimized_research(self, topic: str, research_query: str, output_type: str) -> Dict:
+        """Conduz pesquisa profunda otimizada para modelos com limitação de tokens"""
+        
+        st.write("### 🔍 Passo 1: Buscando vídeos relacionados...")
+        transcripts = self.rag_system.get_transcripts_by_topic(topic)
+        
+        if not transcripts:
+            return {
+                "status": "error",
+                "message": f"Nenhum vídeo encontrado para o tópico '{topic}'. Faça uma busca primeiro."
+            }
+        
+        st.write(f"✅ Encontrados {len(transcripts)} vídeos para análise")
+        
+        # Estimativa de tokens totais
+        total_chars = sum(len(video["transcript"]) for video in transcripts)
+        estimated_tokens = total_chars // 4
+        st.write(f"📊 Estimativa de tokens: {estimated_tokens:,}")
+        
+        if estimated_tokens > self.max_tokens:
+            st.warning(f"⚠️ Conteúdo extenso detectado. Usando análise otimizada por chunks.")
+        
+        # Passo 2: Análise otimizada de cada vídeo
+        st.write("### 🧠 Passo 2: Análise otimizada por vídeo...")
+        
+        analyses = []
+        progress_bar = st.progress(0)
+        
+        for i, video in enumerate(transcripts):
+            st.write(f"🎥 Analisando: {video['title'][:60]}...")
+            
+            analysis = self.analyze_video_optimized(video, research_query)
+            
+            if analysis["status"] == "success":
+                analyses.append(analysis["analysis"])
+                
+                # Mostra resultado com informação de chunks se aplicável
+                title_display = video['title'][:50] + "..."
+                if "chunks_processed" in analysis:
+                    title_display += f" ({analysis['chunks_processed']} chunks)"
+                
+                with st.expander(f"📊 Análise: {title_display}"):
+                    st.write(analysis["analysis"])
+            else:
+                st.warning(f"⚠️ Erro na análise: {analysis.get('error', 'Erro desconhecido')}")
+            
+            progress_bar.progress((i + 1) / len(transcripts))
+        
+        if not analyses:
+            return {
+                "status": "error",
+                "message": "Nenhuma análise foi bem-sucedida. Verifique a configuração da API."
+            }
+        
+        # Passo 3: Síntese progressiva
+        st.write("### 🔗 Passo 3: Síntese progressiva otimizada...")
+        
+        final_result = self.progressive_synthesis(analyses, research_query, output_type)
+        
+        return {
+            "status": "success",
+            "analyses_count": len(analyses),
+            "total_videos": len(transcripts),
+            "final_result": final_result,
+            "token_optimized": True,
+            "estimated_tokens_saved": max(0, estimated_tokens - self.max_tokens)
+        }
+
 # Interface Streamlit
 def main():
     st.title("🎥 YouTube AI Chat com RAG")
@@ -896,6 +1217,17 @@ def main():
                     "artigo": "📝 Artigo Completo"
                 }[x]
             )
+            
+            # Opção de otimização para modelos limitados
+            st.divider()
+            use_token_optimization = st.checkbox(
+                "🔧 Modo Otimizado (32K tokens)",
+                value=False,
+                help="Use esta opção se seu modelo tem limitação de 32K tokens. Processa em chunks menores."
+            )
+            
+            if use_token_optimization:
+                st.info("💡 **Modo Otimizado ativado**: Ideal para modelos locais com limitação de tokens")
         
         with col2:
             st.subheader("⚙️ Processo Inteligente")
@@ -921,14 +1253,30 @@ def main():
                 
                 # Executa a pesquisa profunda
                 with st.spinner("Iniciando pesquisa profunda..."):
-                    result = deep_research.conduct_deep_research(
-                        topic=research_topic,
-                        research_query=research_query,
-                        output_type=output_type
-                    )
+                    if use_token_optimization:
+                        # Usa pesquisa otimizada para modelos limitados
+                        optimized_research = TokenOptimizedResearch(rag_system)
+                        result = optimized_research.conduct_optimized_research(
+                            topic=research_topic,
+                            research_query=research_query,
+                            output_type=output_type
+                        )
+                    else:
+                        # Usa pesquisa normal completa
+                        result = deep_research.conduct_deep_research(
+                            topic=research_topic,
+                            research_query=research_query,
+                            output_type=output_type
+                        )
                 
                 if result["status"] == "success":
-                    st.success(f"✅ Pesquisa concluída! Analisados {result['analyses_count']}/{result['total_videos']} vídeos")
+                    # Mostra resultado com informações de otimização se aplicável
+                    if result.get("token_optimized"):
+                        st.success(f"✅ Pesquisa otimizada concluída! Analisados {result['analyses_count']}/{result['total_videos']} vídeos")
+                        if result.get("estimated_tokens_saved", 0) > 0:
+                            st.info(f"🔧 Tokens economizados: ~{result['estimated_tokens_saved']:,}")
+                    else:
+                        st.success(f"✅ Pesquisa concluída! Analisados {result['analyses_count']}/{result['total_videos']} vídeos")
                     
                     st.divider()
                     st.header(f"📋 Resultado Final: {output_type.title()}")
@@ -949,6 +1297,13 @@ def main():
                         st.metric("Vídeos Analisados", result['analyses_count'])
                         st.metric("Total de Vídeos Encontrados", result['total_videos'])
                         st.metric("Taxa de Sucesso", f"{(result['analyses_count']/result['total_videos']*100):.1f}%")
+                        
+                        if result.get("token_optimized"):
+                            st.metric("Modo", "🔧 Otimizado (32K)")
+                            if result.get("estimated_tokens_saved", 0) > 0:
+                                st.metric("Tokens Economizados", f"~{result['estimated_tokens_saved']:,}")
+                        else:
+                            st.metric("Modo", "🚀 Completo")
                 
                 else:
                     st.error(f"❌ {result['message']}")
